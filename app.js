@@ -92,8 +92,8 @@ const FOOD_DB = {
   "בצל לבן": { cal: 40, protein: 1.1, carbs: 9.3, fat: 0.1 },
   "טופו": { cal: 76, protein: 8, carbs: 1.9, fat: 4.8 },
   "שקדים": { cal: 579, protein: 21, carbs: 22, fat: 50 },
-  "טחינה גולמית": { cal: 595, protein: 17, carbs: 21, fat: 54 },
-  "שמן זית": { cal: 884, protein: 0, carbs: 0, fat: 100 },
+  "טחינה גולמית": { cal: 595, protein: 17, carbs: 21, fat: 54, tspGrams: 8 },
+  "שמן זית": { cal: 884, protein: 0, carbs: 0, fat: 100, tspGrams: 4.5 },
 };
 
 // ---------------------------------------------------------- data layer --
@@ -180,6 +180,8 @@ const state = {
   mode: "meal",
   mealItems: [],
   mealSource: "list",
+  mealUnit: "g",
+  singleUnit: "g",
   itemSource: "search",
   expandedHistoryDays: new Set(),
 };
@@ -327,6 +329,10 @@ function mealPanelHTML() {
     <div class="src-panel-list relative">
       <input id="meal-food-input" type="text" autocomplete="off" placeholder="חיפוש או בחירה מהרשימה..." class="w-full rounded-xl px-3 py-2.5 text-sm mb-2 border border-border" />
       <div id="meal-food-dropdown" class="hidden absolute z-20 -mt-1 w-full max-h-48 overflow-y-auto bg-white border border-border rounded-xl shadow-lg"></div>
+      <div id="meal-unit-toggle" class="hidden flex items-center gap-1.5 mb-2">
+        <button data-unit="g" class="meal-unit-btn flex-1 text-xs font-medium py-2 rounded-lg border">גרם</button>
+        <button data-unit="tsp" class="meal-unit-btn flex-1 text-xs font-medium py-2 rounded-lg border">כפיות</button>
+      </div>
     </div>
 
     <div class="src-panel-search hidden">
@@ -386,6 +392,10 @@ function singlePanelHTML() {
       <div id="single-food-dropdown" class="hidden absolute z-20 -mt-1 w-full max-h-48 overflow-y-auto bg-white border border-border rounded-xl shadow-lg"></div>
     </div>
     <input id="single-food-name" type="text" placeholder="שם הפריט" class="hidden w-full rounded-xl px-3 py-2.5 text-sm mb-2 border border-border" />
+    <div id="single-unit-toggle" class="hidden flex items-center gap-1.5 mb-2">
+      <button data-unit="g" class="single-unit-btn flex-1 text-xs font-medium py-2 rounded-lg border">גרם</button>
+      <button data-unit="tsp" class="single-unit-btn flex-1 text-xs font-medium py-2 rounded-lg border">כפיות</button>
+    </div>
     <div class="flex gap-2 mb-2">
       <input id="single-grams" type="number" placeholder="גרם" class="flex-1 rounded-xl px-3 py-2.5 text-sm border border-border" />
       <input id="single-cal" type="number" placeholder="קלוריות" class="single-custom hidden flex-1 rounded-xl px-3 py-2.5 text-sm border border-border" />
@@ -489,7 +499,7 @@ function setItemSource(src) {
 // ------------------------------------------------------------------ foods --
 // A text input + filtered dropdown list, used instead of a native <select>
 // so ingredients can be found either by scrolling or by typing to search.
-function createFoodPicker(inputEl, dropdownEl) {
+function createFoodPicker(inputEl, dropdownEl, onSelect) {
   let selected = "";
 
   function renderList(filterText) {
@@ -511,6 +521,7 @@ function createFoodPicker(inputEl, dropdownEl) {
         selected = btn.dataset.name;
         inputEl.value = selected;
         dropdownEl.classList.add("hidden");
+        if (onSelect) onSelect(selected);
       })
     );
   }
@@ -519,6 +530,7 @@ function createFoodPicker(inputEl, dropdownEl) {
   inputEl.addEventListener("input", () => {
     selected = "";
     renderList(inputEl.value.trim());
+    if (onSelect) onSelect("");
   });
   inputEl.addEventListener("blur", () => setTimeout(() => dropdownEl.classList.add("hidden"), 150));
 
@@ -527,19 +539,71 @@ function createFoodPicker(inputEl, dropdownEl) {
     setValue: (name) => {
       selected = name;
       inputEl.value = name;
+      if (onSelect) onSelect(name);
     },
     reset: () => {
       selected = "";
       inputEl.value = "";
+      if (onSelect) onSelect("");
     },
   };
 }
 
+// Grams-per-teaspoon lookup for foods that support that unit (e.g. oils, tahini).
+function tspGramsFor(name) {
+  const food = allFoods()[name];
+  return food && food.tspGrams ? food.tspGrams : null;
+}
+
+// How to display a stored amount: teaspoons if that's how it was entered, else grams.
+function formatAmount(it) {
+  return it.unit === "tsp" ? `${it.amount} ${it.amount == 1 ? "כפית" : "כפיות"}` : `${it.grams} גר׳`;
+}
+
+function updateSingleUnitToggle(name) {
+  const supportsTsp = !!tspGramsFor(name);
+  state.singleUnit = "g";
+  $("#single-unit-toggle").classList.toggle("hidden", !supportsTsp);
+  setSingleUnit("g");
+}
+function setSingleUnit(unit) {
+  state.singleUnit = unit;
+  $all(".single-unit-btn").forEach((b) => {
+    const active = b.dataset.unit === unit;
+    b.classList.toggle("bg-green", active);
+    b.classList.toggle("text-white", active);
+    b.classList.toggle("border-green", active);
+    b.classList.toggle("text-muted", !active);
+    b.classList.toggle("border-border", !active);
+  });
+  $("#single-grams").placeholder = unit === "tsp" ? "מספר כפיות" : "גרם";
+}
+
+function updateMealUnitToggle(name) {
+  const supportsTsp = !!tspGramsFor(name);
+  state.mealUnit = "g";
+  $("#meal-unit-toggle").classList.toggle("hidden", !supportsTsp);
+  setMealUnit("g");
+}
+function setMealUnit(unit) {
+  state.mealUnit = unit;
+  $all(".meal-unit-btn").forEach((b) => {
+    const active = b.dataset.unit === unit;
+    b.classList.toggle("bg-green", active);
+    b.classList.toggle("text-white", active);
+    b.classList.toggle("border-green", active);
+    b.classList.toggle("text-muted", !active);
+    b.classList.toggle("border-border", !active);
+  });
+  $("#meal-grams").placeholder = unit === "tsp" ? "מספר כפיות" : "גרם";
+}
+
 let mealFoodPicker, singleFoodPicker;
 function initFoodPickers() {
-  mealFoodPicker = createFoodPicker($("#meal-food-input"), $("#meal-food-dropdown"));
-  singleFoodPicker = createFoodPicker($("#single-food-input"), $("#single-food-dropdown"));
+  mealFoodPicker = createFoodPicker($("#meal-food-input"), $("#meal-food-dropdown"), updateMealUnitToggle);
+  singleFoodPicker = createFoodPicker($("#single-food-input"), $("#single-food-dropdown"), updateSingleUnitToggle);
 }
+
 
 // --------------------------------------------------------------- summary --
 function updateGoal() {
@@ -621,7 +685,7 @@ function singleEntryHTML(e) {
   <li class="flex items-center justify-between bg-row rounded-xl px-3 py-2.5">
     <div>
       <p class="text-sm font-medium text-ink">${escapeHtml(e.name)}</p>
-      <p class="text-xs text-mutedLight">${e.grams ?? ""} גרם · חלבון ${round1(e.protein)} · פחמ׳ ${round1(e.carbs)} · שומן ${round1(e.fat)}</p>
+      <p class="text-xs text-mutedLight">${formatAmount(e)} · חלבון ${round1(e.protein)} · פחמ׳ ${round1(e.carbs)} · שומן ${round1(e.fat)}</p>
     </div>
     <div class="flex items-center gap-3">
       <span class="font-mono-he font-bold text-sm text-ink">🔥 ${Math.round(e.cal)}</span>
@@ -634,7 +698,7 @@ function mealEntryHTML(e) {
   const itemsHTML = (e.items || [])
     .map(
       (it) => `<li class="flex items-center justify-between text-xs">
-        <span class="text-inkSoft">${escapeHtml(it.name)} <span class="text-mutedLight">· ${it.grams} גר׳</span></span>
+        <span class="text-inkSoft">${escapeHtml(it.name)} <span class="text-mutedLight">· ${formatAmount(it)}</span></span>
         <span class="font-mono-he text-muted">${Math.round(it.cal)} קל׳</span>
       </li>`
     )
@@ -680,7 +744,7 @@ function renderMealItemsBox() {
   $("#meal-items-list").innerHTML = state.mealItems
     .map(
       (it, i) => `<li class="flex items-center justify-between text-sm">
-        <span class="text-ink">${escapeHtml(it.name)} <span class="text-mutedLight">· ${it.grams} גר׳</span></span>
+        <span class="text-ink">${escapeHtml(it.name)} <span class="text-mutedLight">· ${formatAmount(it)}</span></span>
         <div class="flex items-center gap-2">
           <span class="font-mono-he text-xs text-muted">${Math.round(it.cal)} קל׳</span>
           <button data-remove-ingredient="${i}" class="text-red">✕</button>
@@ -717,14 +781,21 @@ async function handleMealSearch() {
 }
 
 async function handleAddIngredientToMeal() {
-  const grams = parseFloat($("#meal-grams").value);
-  if (!grams || grams <= 0) return;
+  const amount = parseFloat($("#meal-grams").value);
+  if (!amount || amount <= 0) return;
 
   if (state.mealSource === "list") {
     const name = mealFoodPicker.getValue();
     const food = foodByName(name);
     if (!food) return;
-    state.mealItems.push({ name, grams, ...scaleFood(food, grams) });
+    const tsp = state.mealUnit === "tsp" ? tspGramsFor(name) : null;
+    const grams = tsp ? amount * tsp : amount;
+    const item = { name, grams, ...scaleFood(food, grams) };
+    if (tsp) {
+      item.unit = "tsp";
+      item.amount = amount;
+    }
+    state.mealItems.push(item);
     mealFoodPicker.reset();
   } else if (state.mealSource === "search") {
     const name = $("#meal-search-name").value.trim();
@@ -736,7 +807,7 @@ async function handleAddIngredientToMeal() {
       carbs: parseFloat($("#meal-search-carbs").value) || 0,
       fat: parseFloat($("#meal-search-fat").value) || 0,
     };
-    state.mealItems.push({ name, grams, ...scaleFood(per100, grams) });
+    state.mealItems.push({ name, grams: amount, ...scaleFood(per100, amount) });
     state.customFoods[name] = per100;
     saveFood(name, per100);
     $("#meal-search-name").value = "";
@@ -751,7 +822,7 @@ async function handleAddIngredientToMeal() {
       carbs: parseFloat($("#meal-manual-carbs").value) || 0,
       fat: parseFloat($("#meal-manual-fat").value) || 0,
     };
-    state.mealItems.push({ name, grams, ...scaleFood(per100, grams) });
+    state.mealItems.push({ name, grams: amount, ...scaleFood(per100, amount) });
     state.customFoods[name] = per100;
     saveFood(name, per100);
     ["meal-manual-name", "meal-manual-cal", "meal-manual-protein", "meal-manual-carbs", "meal-manual-fat"].forEach(
@@ -776,8 +847,8 @@ async function handleSaveMeal() {
 
 // ---------------------------------------------------------------- single --
 async function handleAddSingle() {
-  const grams = parseFloat($("#single-grams").value);
-  if (!grams || grams <= 0) return;
+  const amount = parseFloat($("#single-grams").value);
+  if (!amount || amount <= 0) return;
   let payload;
   if ($("#single-food-picker-wrap").classList.contains("hidden")) {
     const name = $("#single-food-name").value.trim();
@@ -785,7 +856,7 @@ async function handleAddSingle() {
     payload = {
       date: todayISO(),
       name,
-      grams,
+      grams: amount,
       cal: parseFloat($("#single-cal").value) || 0,
       protein: parseFloat($("#single-protein").value) || 0,
       carbs: parseFloat($("#single-carbs").value) || 0,
@@ -795,7 +866,13 @@ async function handleAddSingle() {
     const name = singleFoodPicker.getValue();
     const food = foodByName(name);
     if (!food) return;
+    const tsp = state.singleUnit === "tsp" ? tspGramsFor(name) : null;
+    const grams = tsp ? amount * tsp : amount;
     payload = { date: todayISO(), name, grams, ...scaleFood(food, grams) };
+    if (tsp) {
+      payload.unit = "tsp";
+      payload.amount = amount;
+    }
   }
   await addEntryDoc(payload);
   $("#single-grams").value = "";
@@ -985,7 +1062,7 @@ function dayCardHTML(d) {
       : `<ul class="space-y-1.5 mt-2">${d.items
           .map(
             (it) => `<li class="flex items-center justify-between text-xs">
-              <span class="text-inkSoft">${escapeHtml(it.name)} <span class="text-mutedLight">· ${it.grams} גר׳</span></span>
+              <span class="text-inkSoft">${escapeHtml(it.name)} <span class="text-mutedLight">· ${formatAmount(it)}</span></span>
               <span class="font-mono-he text-muted">${Math.round(it.cal)} קל׳</span>
             </li>`
           )
@@ -1032,6 +1109,8 @@ function bindStaticEvents() {
   $all(".tab-btn").forEach((b) => b.addEventListener("click", () => setActiveTab(b.dataset.tab)));
   $all(".src-btn").forEach((b) => b.addEventListener("click", () => setMealSource(b.dataset.src)));
   $all(".item-src-btn").forEach((b) => b.addEventListener("click", () => setItemSource(b.dataset.itemSrc)));
+  $all(".single-unit-btn").forEach((b) => b.addEventListener("click", () => setSingleUnit(b.dataset.unit)));
+  $all(".meal-unit-btn").forEach((b) => b.addEventListener("click", () => setMealUnit(b.dataset.unit)));
   setMealSource("list");
   setItemSource("search");
 
