@@ -1,0 +1,15 @@
+.font-display { font-family: 'Rubik', sans-serif; }
+.font-body { font-family: 'Heebo', sans-serif; }
+.font-mono-he { font-family: 'Rubik', sans-serif; font-variant-numeric: tabular-nums; }
+
+.spin { animation: spin 1s linear infinite; }
+@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+#drawer.open { transform: translateX(0); }
+#drawer-backdrop.open { opacity: 1; pointer-events: auto; }
+
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
