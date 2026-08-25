@@ -187,6 +187,7 @@ const state = {
   mealUnit: "g",
   singleUnit: "g",
   itemSource: "search",
+  editingEntryId: null,
   expandedHistoryDays: new Set(),
 };
 
@@ -322,6 +323,10 @@ function renderShell() {
 function mealPanelHTML() {
   return `
   <div id="panel-meal" class="tab-panel">
+    <div id="meal-edit-banner" class="items-center justify-between rounded-xl px-3 py-2 mb-3" style="display:none;background-color:#F7F5EE">
+      <span class="text-xs font-bold text-green">✎ עריכת ארוחה קיימת</span>
+      <button id="cancel-edit-meal-btn" class="text-xs text-red underline">ביטול</button>
+    </div>
     <input id="meal-name" type="text" placeholder='שם הארוחה (לדוגמה: "ארוחת צהריים")' class="w-full rounded-xl px-3 py-2.5 text-sm mb-3 font-display font-bold border border-border" />
     <p class="text-xs mb-2 text-muted">הוסיפי כל מרכיב בארוחה בנפרד:</p>
     <div class="flex items-center gap-1.5 mb-2">
@@ -673,6 +678,13 @@ function renderEntries() {
       renderEntries();
     })
   );
+  $all("[data-edit-meal]", list).forEach((btn) =>
+    btn.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      const entry = state.entries.find((e) => e.id === btn.dataset.editMeal);
+      if (entry) startEditMeal(entry);
+    })
+  );
   $all("[data-delete]", list).forEach((btn) =>
     btn.addEventListener("click", async (ev) => {
       ev.stopPropagation();
@@ -719,6 +731,7 @@ function mealEntryHTML(e) {
       </div>
       <div class="flex items-center gap-3">
         <span class="font-mono-he font-bold text-sm text-ink">🔥 ${Math.round(e.cal)}</span>
+        <span data-edit-meal="${e.id}" class="text-green">✎</span>
         <span data-delete="${e.id}" class="text-red">🗑</span>
       </div>
     </button>
@@ -837,10 +850,41 @@ async function handleAddIngredientToMeal() {
   renderMealItemsBox();
 }
 
+async function updateEntryDoc(id, data) {
+  await setDoc(doc(db, "entries", id), data);
+}
+
+function startEditMeal(entry) {
+  state.editingEntryId = entry.id;
+  state.mealItems = (entry.items || []).map((it) => ({ ...it }));
+  setActiveTab("meal");
+  $("#meal-name").value = entry.name;
+  $("#meal-edit-banner").style.display = "flex";
+  $("#save-meal-btn").textContent = "✓ עדכון ארוחה";
+  renderMealItemsBox();
+}
+
+function cancelEditMeal() {
+  state.editingEntryId = null;
+  state.mealItems = [];
+  $("#meal-name").value = "";
+  $("#meal-edit-banner").style.display = "none";
+  $("#save-meal-btn").textContent = "+ הוסף ארוחה";
+  renderMealItemsBox();
+}
+
 async function handleSaveMeal() {
   if (state.mealItems.length === 0) return;
   const name = $("#meal-name").value.trim() || "ארוחה";
-  await addEntryDoc({ date: todayISO(), name, isMeal: true, items: state.mealItems, ...sumItems(state.mealItems) });
+  const data = { date: todayISO(), name, isMeal: true, items: state.mealItems, ...sumItems(state.mealItems) };
+  if (state.editingEntryId) {
+    await updateEntryDoc(state.editingEntryId, data);
+    state.editingEntryId = null;
+    $("#meal-edit-banner").style.display = "none";
+    $("#save-meal-btn").textContent = "+ הוסף ארוחה";
+  } else {
+    await addEntryDoc(data);
+  }
   state.mealItems = [];
   $("#meal-name").value = "";
   renderMealItemsBox();
@@ -1121,6 +1165,7 @@ function bindStaticEvents() {
   $("#meal-search-btn").addEventListener("click", handleMealSearch);
   $("#meal-add-ingredient").addEventListener("click", handleAddIngredientToMeal);
   $("#save-meal-btn").addEventListener("click", handleSaveMeal);
+  $("#cancel-edit-meal-btn").addEventListener("click", cancelEditMeal);
 
   $("#single-custom-toggle").addEventListener("click", () => {
     const nowCustom = $("#single-food-name").classList.contains("hidden");
