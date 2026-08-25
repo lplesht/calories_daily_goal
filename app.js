@@ -151,30 +151,35 @@ async function fetchEntriesForDates(dates) {
   return byDate;
 }
 
-// Looks up average nutrition per 100g for a food name via USDA FoodData Central (free, public API).
+// Looks up average nutrition per 100g for a food name via Open Food Facts —
+// free, no API key, and (unlike USDA FoodData Central) actually allows
+// direct requests from a browser instead of blocking them with CORS.
 async function searchNutrition(name) {
-  const resp = await fetch(
-    `https://api.nal.usda.gov/fdc/v1/foods/search?query=${encodeURIComponent(name)}&pageSize=6&api_key=DEMO_KEY`
-  );
-  if (!resp.ok) throw new Error("שגיאה בחיפוש באינטרנט");
+  const url = `https://world.openfoodfacts.org/cgi/search.pl?search_terms=${encodeURIComponent(
+    name
+  )}&search_simple=1&action=process&json=1&page_size=10`;
+  let resp;
+  try {
+    resp = await fetch(url);
+  } catch (err) {
+    throw new Error("שגיאה בחיפוש באינטרנט. יש לבדוק חיבור לרשת ולנסות שוב.");
+  }
+  if (!resp.ok) throw new Error("שגיאה בחיפוש באינטרנט. יש לבדוק חיבור לרשת ולנסות שוב.");
   const data = await resp.json();
-  const foods = (data.foods || []).sort((a, b) => {
-    const rank = (f) => (["Foundation", "SR Legacy"].includes(f.dataType) ? 0 : 1);
-    return rank(a) - rank(b);
-  });
-  for (const f of foods) {
-    const nutrients = {};
-    (f.foodNutrients || []).forEach((n) => (nutrients[n.nutrientName] = n.value));
-    if (nutrients["Energy"] != null) {
+  const products = data.products || [];
+  for (const p of products) {
+    const n = p.nutriments || {};
+    const cal = n["energy-kcal_100g"];
+    if (cal != null && cal > 0) {
       return {
-        cal: round1(nutrients["Energy"]),
-        protein: round1(nutrients["Protein"] || 0),
-        carbs: round1(nutrients["Carbohydrate, by difference"] || 0),
-        fat: round1(nutrients["Total lipid (fat)"] || 0),
+        cal: round1(cal),
+        protein: round1(n["proteins_100g"] || 0),
+        carbs: round1(n["carbohydrates_100g"] || 0),
+        fat: round1(n["fat_100g"] || 0),
       };
     }
   }
-  throw new Error(`לא נמצאו תוצאות עבור "${name}"`);
+  throw new Error(`לא נמצאו תוצאות עבור "${name}" — אפשר לנסות שם באנגלית, או לעבור להזנה ידנית.`);
 }
 
 // ------------------------------------------------------------------ state --
@@ -467,7 +472,7 @@ function newItemPanelHTML() {
     </div>
 
     <div class="item-src-panel-search">
-      <p class="text-xs mb-2 text-muted">הזיני שם מוצר — נחפש עבורך את הערכים התזונתיים הממוצעים ל-100 גרם באינטרנט (USDA FoodData Central).</p>
+      <p class="text-xs mb-2 text-muted">הזיני שם מוצר — נחפש עבורך את הערכים התזונתיים הממוצעים ל-100 גרם באינטרנט (Open Food Facts). שם באנגלית לעיתים נותן תוצאות טובות יותר.</p>
       <div class="flex gap-2 mb-3">
         <input id="lookup-name" type="text" placeholder='למשל: "פלאפל"' class="flex-1 rounded-xl px-3 py-2.5 text-sm border border-border" />
         <button id="lookup-btn" class="px-4 rounded-xl text-sm font-display font-bold bg-green text-white">חיפוש</button>
