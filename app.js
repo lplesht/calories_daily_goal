@@ -110,6 +110,9 @@ async function fetchCustomFoods() {
 async function saveFood(name, per100) {
   await setDoc(doc(db, "foods", name), per100, { merge: true });
 }
+async function deleteFoodDoc(name) {
+  await deleteDoc(doc(db, "foods", name));
+}
 async function fetchEntries(dateStr) {
   const q = query(collection(db, "entries"), where("date", "==", dateStr));
   const snap = await getDocs(q);
@@ -188,6 +191,7 @@ const state = {
   singleUnit: "g",
   itemSource: "search",
   editingEntryId: null,
+  editingSingleId: null,
   expandedHistoryDays: new Set(),
 };
 
@@ -232,6 +236,38 @@ function allFoods() {
 }
 function foodByName(name) {
   return allFoods()[name];
+}
+
+function renderCustomFoodsList() {
+  const container = $("#custom-foods-list");
+  if (!container) return;
+  const names = Object.keys(state.customFoods).sort((a, b) => a.localeCompare(b, "he"));
+  if (names.length === 0) {
+    container.innerHTML = `<p class="text-xs text-mutedLight">עוד לא הוספת מוצרים משלך.</p>`;
+    return;
+  }
+  container.innerHTML = names
+    .map((name) => {
+      const f = state.customFoods[name];
+      return `<li class="flex items-center justify-between bg-row rounded-xl px-3 py-2 text-sm">
+        <div>
+          <span class="text-ink font-medium">${escapeHtml(name)}</span>
+          <span class="text-mutedLight" style="font-size:11px"> · ${f.cal} קל׳ ל-100 גר׳</span>
+        </div>
+        <button data-delete-food="${escapeHtml(name)}" class="text-red">🗑</button>
+      </li>`;
+    })
+    .join("");
+  $all("[data-delete-food]", container).forEach((btn) =>
+    btn.addEventListener("click", () => deleteCustomFood(btn.dataset.deleteFood))
+  );
+}
+
+async function deleteCustomFood(name) {
+  if (!window.confirm(`למחוק את "${name}" מהמאגר?`)) return;
+  await deleteFoodDoc(name);
+  delete state.customFoods[name];
+  renderCustomFoodsList();
 }
 
 // -------------------------------------------------------------- app shell --
@@ -393,6 +429,10 @@ function mealPanelHTML() {
 function singlePanelHTML() {
   return `
   <div id="panel-single" class="tab-panel hidden">
+    <div id="single-edit-banner" class="items-center justify-between rounded-xl px-3 py-2 mb-3" style="display:none;background-color:#F7F5EE">
+      <span class="text-xs font-bold text-green">✎ עריכת פריט קיים</span>
+      <button id="cancel-edit-single-btn" class="text-xs text-red underline">ביטול</button>
+    </div>
     <div class="flex items-center justify-end mb-2">
       <button id="single-custom-toggle" class="text-xs font-medium underline text-green">ערכים חד-פעמיים</button>
     </div>
@@ -456,6 +496,11 @@ function newItemPanelHTML() {
       </div>
       <button id="save-manual-item-btn" class="w-full rounded-xl py-2.5 text-sm font-display font-bold bg-green text-white">שמירת מוצר למאגר</button>
     </div>
+
+    <div class="mt-4 pt-4" style="border-top:1px solid #E4DFCF">
+      <p class="text-xs font-bold mb-2 text-muted">מוצרים שהוספת למאגר</p>
+      <ul id="custom-foods-list" class="space-y-1.5"></ul>
+    </div>
   </div>`;
 }
 
@@ -476,6 +521,7 @@ function setActiveTab(tab) {
     b.classList.toggle("text-muted", !active);
   });
   $all(".tab-panel").forEach((p) => p.classList.toggle("hidden", p.id !== `panel-${tab}`));
+  if (tab === "newItem") renderCustomFoodsList();
 }
 function setMealSource(src) {
   state.mealSource = src;
@@ -678,6 +724,13 @@ function renderEntries() {
       renderEntries();
     })
   );
+  $all("[data-edit-single]", list).forEach((btn) =>
+    btn.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      const entry = state.entries.find((e) => e.id === btn.dataset.editSingle);
+      if (entry) startEditSingle(entry);
+    })
+  );
   $all("[data-edit-meal]", list).forEach((btn) =>
     btn.addEventListener("click", (ev) => {
       ev.stopPropagation();
@@ -705,6 +758,7 @@ function singleEntryHTML(e) {
     </div>
     <div class="flex items-center gap-3">
       <span class="font-mono-he font-bold text-sm text-ink">🔥 ${Math.round(e.cal)}</span>
+      <span data-edit-single="${e.id}" class="text-green">✎</span>
       <button data-delete="${e.id}" class="text-red">🗑</button>
     </div>
   </li>`;
@@ -817,7 +871,11 @@ async function handleAddIngredientToMeal() {
   } else if (state.mealSource === "search") {
     const name = $("#meal-search-name").value.trim();
     const cal = parseFloat($("#meal-search-cal").value) || 0;
-    if (!name || !cal) return;
+    if (!name) return;
+    if (cal <= 0) {
+      alert("לא ניתן להוסיף מוצר עם 0 קלוריות");
+      return;
+    }
     const per100 = {
       cal,
       protein: parseFloat($("#meal-search-protein").value) || 0,
@@ -832,7 +890,11 @@ async function handleAddIngredientToMeal() {
   } else if (state.mealSource === "manual") {
     const name = $("#meal-manual-name").value.trim();
     const cal = parseFloat($("#meal-manual-cal").value) || 0;
-    if (!name || !cal) return;
+    if (!name) return;
+    if (cal <= 0) {
+      alert("לא ניתן להוסיף מוצר עם 0 קלוריות");
+      return;
+    }
     const per100 = {
       cal,
       protein: parseFloat($("#meal-manual-protein").value) || 0,
@@ -894,6 +956,67 @@ async function handleSaveMeal() {
 }
 
 // ---------------------------------------------------------------- single --
+function setSingleCustomMode(nowCustom) {
+  $("#single-food-picker-wrap").classList.toggle("hidden", nowCustom);
+  $("#single-food-name").classList.toggle("hidden", !nowCustom);
+  $all(".single-custom").forEach((el) => el.classList.toggle("hidden", !nowCustom));
+  $("#single-custom-toggle").textContent = nowCustom ? "בחירה מהרשימה" : "ערכים חד-פעמיים";
+}
+
+function startEditSingle(entry) {
+  state.editingSingleId = entry.id;
+  setActiveTab("single");
+
+  // Figure out whether this entry was originally scaled from a known food
+  // (so editing grams should rescale nutrition) or was a one-off custom
+  // entry (so editing should just let the numbers be typed directly).
+  const food = allFoods()[entry.name];
+  let matchesList = false;
+  if (food) {
+    if (entry.unit === "tsp") {
+      matchesList = true; // teaspoon amounts only ever come from the list picker
+    } else if (entry.grams) {
+      const expected = scaleFood(food, entry.grams);
+      matchesList =
+        Math.abs(expected.cal - entry.cal) < 1 &&
+        Math.abs(expected.protein - entry.protein) < 0.5 &&
+        Math.abs(expected.carbs - entry.carbs) < 0.5 &&
+        Math.abs(expected.fat - entry.fat) < 0.5;
+    }
+  }
+
+  if (matchesList) {
+    setSingleCustomMode(false);
+    singleFoodPicker.setValue(entry.name); // this also resets unit to "g" via its onSelect callback
+    if (entry.unit === "tsp") {
+      setSingleUnit("tsp");
+      $("#single-grams").value = entry.amount;
+    } else {
+      $("#single-grams").value = entry.grams;
+    }
+  } else {
+    setSingleCustomMode(true);
+    $("#single-food-name").value = entry.name;
+    $("#single-grams").value = entry.grams;
+    $("#single-cal").value = entry.cal;
+    $("#single-protein").value = entry.protein;
+    $("#single-carbs").value = entry.carbs;
+    $("#single-fat").value = entry.fat;
+  }
+
+  $("#single-edit-banner").style.display = "flex";
+  $("#add-single-btn").textContent = "✓ עדכון פריט";
+}
+
+function cancelEditSingle() {
+  state.editingSingleId = null;
+  $("#single-food-name").value = "";
+  $("#single-grams").value = "";
+  ["single-cal", "single-protein", "single-carbs", "single-fat"].forEach((id) => ($(`#${id}`).value = ""));
+  $("#single-edit-banner").style.display = "none";
+  $("#add-single-btn").textContent = "הוספה ליומן";
+}
+
 async function handleAddSingle() {
   const amount = parseFloat($("#single-grams").value);
   if (!amount || amount <= 0) return;
@@ -901,11 +1024,16 @@ async function handleAddSingle() {
   if ($("#single-food-picker-wrap").classList.contains("hidden")) {
     const name = $("#single-food-name").value.trim();
     if (!name) return;
+    const cal = parseFloat($("#single-cal").value) || 0;
+    if (cal <= 0) {
+      alert("לא ניתן להוסיף מוצר עם 0 קלוריות");
+      return;
+    }
     payload = {
       date: todayISO(),
       name,
       grams: amount,
-      cal: parseFloat($("#single-cal").value) || 0,
+      cal,
       protein: parseFloat($("#single-protein").value) || 0,
       carbs: parseFloat($("#single-carbs").value) || 0,
       fat: parseFloat($("#single-fat").value) || 0,
@@ -922,7 +1050,12 @@ async function handleAddSingle() {
       payload.amount = amount;
     }
   }
-  await addEntryDoc(payload);
+  if (state.editingSingleId) {
+    await updateEntryDoc(state.editingSingleId, payload);
+    cancelEditSingle();
+  } else {
+    await addEntryDoc(payload);
+  }
   $("#single-grams").value = "";
   $("#single-food-name").value = "";
   singleFoodPicker.reset();
@@ -955,8 +1088,13 @@ async function handleLookup() {
 async function handleSaveLookupProduct() {
   const name = $("#lookup-name").value.trim();
   if (!name) return;
+  const cal = parseFloat($("#lookup-cal").value) || 0;
+  if (cal <= 0) {
+    alert("לא ניתן להוסיף מוצר עם 0 קלוריות");
+    return;
+  }
   const per100 = {
-    cal: parseFloat($("#lookup-cal").value) || 0,
+    cal,
     protein: parseFloat($("#lookup-protein").value) || 0,
     carbs: parseFloat($("#lookup-carbs").value) || 0,
     fat: parseFloat($("#lookup-fat").value) || 0,
@@ -971,8 +1109,12 @@ async function handleSaveLookupProduct() {
 }
 async function handleSaveManualProduct() {
   const name = $("#manual-item-name").value.trim();
+  if (!name) return;
   const cal = parseFloat($("#manual-item-cal").value) || 0;
-  if (!name || !cal) return;
+  if (cal <= 0) {
+    alert("לא ניתן להוסיף מוצר עם 0 קלוריות");
+    return;
+  }
   const per100 = {
     cal,
     protein: parseFloat($("#manual-item-protein").value) || 0,
@@ -1166,13 +1308,11 @@ function bindStaticEvents() {
   $("#meal-add-ingredient").addEventListener("click", handleAddIngredientToMeal);
   $("#save-meal-btn").addEventListener("click", handleSaveMeal);
   $("#cancel-edit-meal-btn").addEventListener("click", cancelEditMeal);
+  $("#cancel-edit-single-btn").addEventListener("click", cancelEditSingle);
 
   $("#single-custom-toggle").addEventListener("click", () => {
     const nowCustom = $("#single-food-name").classList.contains("hidden");
-    $("#single-food-picker-wrap").classList.toggle("hidden", nowCustom);
-    $("#single-food-name").classList.toggle("hidden", !nowCustom);
-    $all(".single-custom").forEach((el) => el.classList.toggle("hidden", !nowCustom));
-    $("#single-custom-toggle").textContent = nowCustom ? "בחירה מהרשימה" : "ערכים חד-פעמיים";
+    setSingleCustomMode(nowCustom);
   });
   $("#add-single-btn").addEventListener("click", handleAddSingle);
 
