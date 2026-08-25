@@ -121,8 +121,10 @@ async function fetchAllGoals() {
   snap.forEach((d) => (history[d.data().date] = d.data().goal));
   return history;
 }
-async function addGoalDoc(dateStr, value) {
-  await addDoc(collection(db, "goals"), { date: dateStr, goal: value });
+async function setGoalDoc(dateStr, value) {
+  // One document per date, overwritten on every edit — avoids duplicate
+  // same-day docs whose read-back order Firestore doesn't guarantee.
+  await setDoc(doc(db, "goals", dateStr), { date: dateStr, goal: value });
 }
 async function fetchEntriesForDates(dates) {
   // Firestore 'in' supports up to 30 values — 7 is plenty.
@@ -198,7 +200,7 @@ async function init() {
 
   renderShell();
   bindStaticEvents();
-  renderFoodOptions();
+  initFoodPickers();
   updateGoal();
   updateSummary();
   renderEntries();
@@ -214,7 +216,7 @@ function foodByName(name) {
 // -------------------------------------------------------------- app shell --
 function renderShell() {
   $("#app").innerHTML = `
-    <h1 class="font-display font-black text-2xl text-center mb-4 text-ink">יעד קלורי יומי</h1>
+    <h1 class="font-display font-black text-2xl text-center mb-4 text-ink">חישוב קלוריות יומי</h1>
 
     <div class="flex items-center justify-between mb-5 px-1">
       <div class="flex items-center gap-2">
@@ -224,7 +226,14 @@ function renderShell() {
           <p class="text-xs leading-tight text-muted">${new Date().toLocaleDateString("he-IL", { weekday: "long", day: "numeric", month: "long" })}</p>
         </div>
       </div>
-      <button id="menu-btn" class="w-9 h-9 rounded-full bg-card flex items-center justify-center shadow-sm text-lg">☰</button>
+      <div class="relative">
+        <button id="menu-btn" class="w-9 h-9 rounded-full bg-card flex items-center justify-center shadow-sm text-lg">☰</button>
+        <div id="menu-dropdown" class="hidden absolute left-0 mt-2 w-56 bg-card rounded-xl shadow-lg border border-border z-30 overflow-hidden">
+          <button id="menu-history-btn" class="w-full text-right px-4 py-3 text-sm text-ink flex items-center gap-2">
+            <span class="text-green">📅</span> היסטוריית אירועים
+          </button>
+        </div>
+      </div>
     </div>
 
     <div class="bg-card rounded-2xl px-4 py-3 mb-4 flex items-center justify-between shadow-sm">
@@ -301,9 +310,10 @@ function mealPanelHTML() {
       <button data-src="manual" class="src-btn flex-1 text-xs font-medium py-2 rounded-lg border">הזנה ידנית</button>
     </div>
 
-    <select id="meal-food-select" class="src-panel-list w-full rounded-xl px-3 py-2.5 text-sm mb-2 border border-border">
-      <option value="">בחרי מרכיב...</option>
-    </select>
+    <div class="src-panel-list relative">
+      <input id="meal-food-input" type="text" autocomplete="off" placeholder="חיפוש או בחירה מהרשימה..." class="w-full rounded-xl px-3 py-2.5 text-sm mb-2 border border-border" />
+      <div id="meal-food-dropdown" class="hidden absolute z-20 -mt-1 w-full max-h-48 overflow-y-auto bg-white border border-border rounded-xl shadow-lg"></div>
+    </div>
 
     <div class="src-panel-search hidden">
       <div class="flex gap-2 mb-2">
@@ -357,9 +367,10 @@ function singlePanelHTML() {
     <div class="flex items-center justify-end mb-2">
       <button id="single-custom-toggle" class="text-xs font-medium underline text-green">ערכים חד-פעמיים</button>
     </div>
-    <select id="single-food-select" class="w-full rounded-xl px-3 py-2.5 text-sm mb-2 border border-border">
-      <option value="">בחרי פריט...</option>
-    </select>
+    <div id="single-food-picker-wrap" class="relative">
+      <input id="single-food-input" type="text" autocomplete="off" placeholder="חיפוש או בחירה מהרשימה..." class="w-full rounded-xl px-3 py-2.5 text-sm mb-2 border border-border" />
+      <div id="single-food-dropdown" class="hidden absolute z-20 -mt-1 w-full max-h-48 overflow-y-auto bg-white border border-border rounded-xl shadow-lg"></div>
+    </div>
     <input id="single-food-name" type="text" placeholder="שם הפריט" class="hidden w-full rounded-xl px-3 py-2.5 text-sm mb-2 border border-border" />
     <div class="flex gap-2 mb-2">
       <input id="single-grams" type="number" placeholder="גרם" class="flex-1 rounded-xl px-3 py-2.5 text-sm border border-border" />
@@ -462,11 +473,58 @@ function setItemSource(src) {
 }
 
 // ------------------------------------------------------------------ foods --
-function renderFoodOptions() {
-  const names = Object.keys(allFoods()).sort((a, b) => a.localeCompare(b, "he"));
-  const opts = names.map((n) => `<option value="${escapeHtml(n)}">${escapeHtml(n)}</option>`).join("");
-  $("#meal-food-select").innerHTML = `<option value="">בחרי מרכיב...</option>${opts}`;
-  $("#single-food-select").innerHTML = `<option value="">בחרי פריט...</option>${opts}`;
+// A text input + filtered dropdown list, used instead of a native <select>
+// so ingredients can be found either by scrolling or by typing to search.
+function createFoodPicker(inputEl, dropdownEl) {
+  let selected = "";
+
+  function renderList(filterText) {
+    const names = Object.keys(allFoods()).sort((a, b) => a.localeCompare(b, "he"));
+    const filtered = filterText ? names.filter((n) => n.includes(filterText)) : names;
+    dropdownEl.innerHTML =
+      filtered.length === 0
+        ? `<div class="px-3 py-2 text-xs text-mutedLight">אין תוצאות</div>`
+        : filtered
+            .map(
+              (n) =>
+                `<button type="button" data-name="${escapeHtml(n)}" class="food-option w-full text-right px-3 py-2 text-sm text-ink block">${escapeHtml(n)}</button>`
+            )
+            .join("");
+    dropdownEl.classList.remove("hidden");
+    $all(".food-option", dropdownEl).forEach((btn) =>
+      btn.addEventListener("mousedown", (ev) => {
+        ev.preventDefault(); // keep focus so blur doesn't hide the list before click registers
+        selected = btn.dataset.name;
+        inputEl.value = selected;
+        dropdownEl.classList.add("hidden");
+      })
+    );
+  }
+
+  inputEl.addEventListener("focus", () => renderList(inputEl.value.trim()));
+  inputEl.addEventListener("input", () => {
+    selected = "";
+    renderList(inputEl.value.trim());
+  });
+  inputEl.addEventListener("blur", () => setTimeout(() => dropdownEl.classList.add("hidden"), 150));
+
+  return {
+    getValue: () => selected,
+    setValue: (name) => {
+      selected = name;
+      inputEl.value = name;
+    },
+    reset: () => {
+      selected = "";
+      inputEl.value = "";
+    },
+  };
+}
+
+let mealFoodPicker, singleFoodPicker;
+function initFoodPickers() {
+  mealFoodPicker = createFoodPicker($("#meal-food-input"), $("#meal-food-dropdown"));
+  singleFoodPicker = createFoodPicker($("#single-food-input"), $("#single-food-dropdown"));
 }
 
 // --------------------------------------------------------------- summary --
@@ -488,7 +546,7 @@ function updateGoal() {
       const v = parseFloat(input.value);
       if (v && v > 0) {
         const today = todayISO();
-        await addGoalDoc(today, v);
+        await setGoalDoc(today, v);
         state.goalsHistory[today] = v;
         state.goal = v;
       }
@@ -531,6 +589,7 @@ function renderEntries() {
   $all("[data-delete]", list).forEach((btn) =>
     btn.addEventListener("click", async (ev) => {
       ev.stopPropagation();
+      if (!window.confirm("האם את בטוחה שברצונך למחוק את הפריט?")) return;
       await deleteEntryDoc(btn.dataset.delete);
       state.entries = await fetchEntries(todayISO());
       updateSummary();
@@ -643,11 +702,11 @@ async function handleAddIngredientToMeal() {
   if (!grams || grams <= 0) return;
 
   if (state.mealSource === "list") {
-    const name = $("#meal-food-select").value;
+    const name = mealFoodPicker.getValue();
     const food = foodByName(name);
     if (!food) return;
     state.mealItems.push({ name, grams, ...scaleFood(food, grams) });
-    $("#meal-food-select").value = "";
+    mealFoodPicker.reset();
   } else if (state.mealSource === "search") {
     const name = $("#meal-search-name").value.trim();
     const cal = parseFloat($("#meal-search-cal").value) || 0;
@@ -661,7 +720,6 @@ async function handleAddIngredientToMeal() {
     state.mealItems.push({ name, grams, ...scaleFood(per100, grams) });
     state.customFoods[name] = per100;
     saveFood(name, per100);
-    renderFoodOptions();
     $("#meal-search-name").value = "";
     $("#meal-search-result").classList.add("hidden");
   } else if (state.mealSource === "manual") {
@@ -677,7 +735,6 @@ async function handleAddIngredientToMeal() {
     state.mealItems.push({ name, grams, ...scaleFood(per100, grams) });
     state.customFoods[name] = per100;
     saveFood(name, per100);
-    renderFoodOptions();
     ["meal-manual-name", "meal-manual-cal", "meal-manual-protein", "meal-manual-carbs", "meal-manual-fat"].forEach(
       (id) => ($(`#${id}`).value = "")
     );
@@ -703,7 +760,7 @@ async function handleAddSingle() {
   const grams = parseFloat($("#single-grams").value);
   if (!grams || grams <= 0) return;
   let payload;
-  if ($("#single-food-select").classList.contains("hidden")) {
+  if ($("#single-food-picker-wrap").classList.contains("hidden")) {
     const name = $("#single-food-name").value.trim();
     if (!name) return;
     payload = {
@@ -716,7 +773,7 @@ async function handleAddSingle() {
       fat: parseFloat($("#single-fat").value) || 0,
     };
   } else {
-    const name = $("#single-food-select").value;
+    const name = singleFoodPicker.getValue();
     const food = foodByName(name);
     if (!food) return;
     payload = { date: todayISO(), name, grams, ...scaleFood(food, grams) };
@@ -724,6 +781,7 @@ async function handleAddSingle() {
   await addEntryDoc(payload);
   $("#single-grams").value = "";
   $("#single-food-name").value = "";
+  singleFoodPicker.reset();
   ["single-cal", "single-protein", "single-carbs", "single-fat"].forEach((id) => ($(`#${id}`).value = ""));
   state.entries = await fetchEntries(todayISO());
   updateSummary();
@@ -761,9 +819,8 @@ async function handleSaveLookupProduct() {
   };
   state.customFoods[name] = per100;
   await saveFood(name, per100);
-  renderFoodOptions();
   setActiveTab("single");
-  $("#single-food-select").value = name;
+  singleFoodPicker.setValue(name);
   $("#lookup-name").value = "";
   $("#lookup-result").classList.add("hidden");
   $("#save-lookup-btn").setAttribute("disabled", "true");
@@ -780,9 +837,8 @@ async function handleSaveManualProduct() {
   };
   state.customFoods[name] = per100;
   await saveFood(name, per100);
-  renderFoodOptions();
   setActiveTab("single");
-  $("#single-food-select").value = name;
+  singleFoodPicker.setValue(name);
   ["manual-item-name", "manual-item-cal", "manual-item-protein", "manual-item-carbs", "manual-item-fat"].forEach(
     (id) => ($(`#${id}`).value = "")
   );
@@ -794,30 +850,32 @@ async function openDrawer() {
   $("#drawer").classList.add("open");
   $("#drawer-content").innerHTML = `<div class="flex items-center justify-center py-16"><div class="spin" style="width:22px;height:22px;border:3px solid #D8D2C4;border-top-color:#4C6B4F;border-radius:50%"></div></div>`;
 
-  const HISTORY_LENGTH = 7;
-  const todayIso = todayISO();
+  const HISTORY_LENGTH = 7; // how many past days to look back over
   const dateList = [];
-  for (let i = HISTORY_LENGTH - 1; i >= 0; i--) {
+  for (let i = HISTORY_LENGTH; i >= 1; i--) {
+    // i starts at HISTORY_LENGTH and stops at 1 — today (i=0) is intentionally excluded,
+    // since "history" here means days that are already over.
     const d = new Date();
     d.setDate(d.getDate() - i);
     dateList.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`);
   }
   const byDate = await fetchEntriesForDates(dateList);
-  const days = dateList.map((dateStr) => {
-    const isToday = dateStr === todayIso;
-    const dayEntries = isToday ? state.entries : byDate[dateStr] || [];
-    const items = dayEntries.flatMap((e) => (e.isMeal ? e.items || [] : [e]));
-    const totals = sumItems(items);
-    const d = new Date(dateStr);
-    return {
-      date: dateStr,
-      isToday,
-      goal: isToday ? state.goal : effectiveGoalFor(state.goalsHistory, dateStr),
-      items,
-      ...totals,
-      label: d.toLocaleDateString("he-IL", { weekday: "short", day: "numeric", month: "numeric" }),
-    };
-  });
+  const days = dateList
+    .map((dateStr) => {
+      const dayEntries = byDate[dateStr] || [];
+      const items = dayEntries.flatMap((e) => (e.isMeal ? e.items || [] : [e]));
+      const totals = sumItems(items);
+      const d = new Date(dateStr);
+      return {
+        date: dateStr,
+        goal: effectiveGoalFor(state.goalsHistory, dateStr),
+        items,
+        ...totals,
+        label: d.toLocaleDateString("he-IL", { weekday: "short", day: "numeric", month: "numeric" }),
+      };
+    })
+    .filter((d) => d.items.length > 0); // only days that actually had something logged
+
   renderDrawer(days);
 }
 function closeDrawer() {
@@ -826,25 +884,39 @@ function closeDrawer() {
 }
 
 function renderDrawer(days) {
-  const chartMax = Math.max(...days.map((d) => Math.max(d.cal, d.goal))) * 1.05;
-  const todayGoal = days.find((d) => d.isToday)?.goal ?? state.goal;
+  if (days.length === 0) {
+    $("#drawer-content").innerHTML = `
+      <div class="flex items-center justify-between mb-4">
+        <div class="flex items-center gap-2">
+          <span class="text-green">📅</span>
+          <h2 class="font-display font-black text-lg text-ink">היסטוריית אירועים</h2>
+        </div>
+        <button id="drawer-close" class="w-8 h-8 rounded-full bg-card flex items-center justify-center">✕</button>
+      </div>
+      <div class="bg-card rounded-2xl p-6 text-center shadow-sm">
+        <p class="text-sm text-mutedLight">אין אירועים קודמים</p>
+      </div>
+    `;
+    $("#drawer-close").addEventListener("click", closeDrawer);
+    return;
+  }
+
+  const chartMax = Math.max(state.goal, ...days.map((d) => Math.max(d.cal, d.goal))) * 1.05;
 
   const bars = days
     .map(
       (d) => `<div class="flex-1 flex flex-col items-center gap-1 h-full justify-end">
         <div class="w-full rounded-t-md" style="height:${Math.max(4, (d.cal / chartMax) * 100)}%;background-color:${
-        d.isToday ? "#C1443A" : d.cal > d.goal ? "#E3A73A" : "#4C6B4F"
-      };${d.isToday ? "border:2px solid #2E2A24;" : ""}"></div>
+        d.cal > d.goal ? "#E3A73A" : "#4C6B4F"
+      }"></div>
       </div>`
     )
     .join("");
   const labels = days
-    .map((d) => {
-      const label = d.isToday ? "היום" : d.label.split(",")[0];
-      return `<div class="flex-1 text-center"><span style="font-size:10px;font-weight:${d.isToday ? 700 : 500};color:${
-        d.isToday ? "#2E2A24" : "#8A8272"
-      }">${label}</span></div>`;
-    })
+    .map(
+      (d) =>
+        `<div class="flex-1 text-center"><span style="font-size:10px;font-weight:500;color:#8A8272">${d.label.split(",")[0]}</span></div>`
+    )
     .join("");
   const cards = [...days].reverse().map((d) => dayCardHTML(d)).join("");
 
@@ -852,19 +924,19 @@ function renderDrawer(days) {
     <div class="flex items-center justify-between mb-4">
       <div class="flex items-center gap-2">
         <span class="text-green">📅</span>
-        <h2 class="font-display font-black text-lg text-ink">היסטוריה</h2>
+        <h2 class="font-display font-black text-lg text-ink">היסטוריית אירועים</h2>
       </div>
       <button id="drawer-close" class="w-8 h-8 rounded-full bg-card flex items-center justify-center">✕</button>
     </div>
 
     <div class="bg-card rounded-2xl p-4 mb-4 shadow-sm">
-      <p class="text-xs font-bold mb-3 text-muted">קלוריות ליום — 7 ימים אחרונים</p>
+      <p class="text-xs font-bold mb-3 text-muted">קלוריות בימים קודמים</p>
       <div class="relative h-28 flex items-end gap-1.5">
-        <div class="absolute right-0 left-0" style="bottom:${(todayGoal / chartMax) * 100}%;border-top:1.5px dashed #8A8272"></div>
+        <div class="absolute right-0 left-0" style="bottom:${(state.goal / chartMax) * 100}%;border-top:1.5px dashed #8A8272"></div>
         ${bars}
       </div>
       <div class="flex gap-1.5 mt-1.5">${labels}</div>
-      <p class="mt-2" style="font-size:10px;color:#8A8272">הקו המקווקו מסמן את היעד הנוכחי (${todayGoal.toLocaleString("he-IL")} קל׳). ימים שהסתיימו נשארים מול היעד שהיה תקף בהם.</p>
+      <p class="mt-2" style="font-size:10px;color:#8A8272">הקו המקווקו מסמן את היעד הנוכחי (${state.goal.toLocaleString("he-IL")} קל׳). כל יום מוצג מול היעד שהיה תקף בו.</p>
     </div>
 
     <p class="text-xs font-bold mb-2 px-1 text-muted">פירוט לפי יום — הקישי על יום לראות מה נאכל בו</p>
@@ -886,7 +958,7 @@ function dayCardHTML(d) {
   const over = diff > 0;
   const pct = Math.min(100, Math.round((d.cal / d.goal) * 100) || 0);
   const expanded = state.expandedHistoryDays.has(d.date);
-  const label = d.isToday ? "היום" : d.label;
+  const label = d.label;
 
   const itemsHTML =
     d.items.length === 0
@@ -901,7 +973,7 @@ function dayCardHTML(d) {
           .join("")}</ul>`;
 
   return `
-  <div class="bg-card rounded-2xl overflow-hidden shadow-sm" style="${d.isToday ? "border:1.5px solid #2E2A24" : ""}">
+  <div class="bg-card rounded-2xl overflow-hidden shadow-sm">
     <button data-day-toggle="${d.date}" class="w-full text-right px-4 py-3">
       <div class="flex items-center justify-between mb-1.5">
         <div class="flex items-center gap-1.5">
@@ -926,7 +998,16 @@ function dayCardHTML(d) {
 
 // ---------------------------------------------------------------- events --
 function bindStaticEvents() {
-  $("#menu-btn").addEventListener("click", openDrawer);
+  $("#menu-btn").addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    $("#menu-dropdown").classList.toggle("hidden");
+  });
+  document.addEventListener("click", () => $("#menu-dropdown").classList.add("hidden"));
+  $("#menu-history-btn").addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    $("#menu-dropdown").classList.add("hidden");
+    openDrawer();
+  });
   $("#drawer-backdrop").addEventListener("click", closeDrawer);
 
   $all(".tab-btn").forEach((b) => b.addEventListener("click", () => setActiveTab(b.dataset.tab)));
@@ -941,7 +1022,7 @@ function bindStaticEvents() {
 
   $("#single-custom-toggle").addEventListener("click", () => {
     const nowCustom = $("#single-food-name").classList.contains("hidden");
-    $("#single-food-select").classList.toggle("hidden", nowCustom);
+    $("#single-food-picker-wrap").classList.toggle("hidden", nowCustom);
     $("#single-food-name").classList.toggle("hidden", !nowCustom);
     $all(".single-custom").forEach((el) => el.classList.toggle("hidden", !nowCustom));
     $("#single-custom-toggle").textContent = nowCustom ? "בחירה מהרשימה" : "ערכים חד-פעמיים";
