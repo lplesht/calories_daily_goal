@@ -188,11 +188,20 @@ async function init() {
     return;
   }
   const today = todayISO();
-  const [customFoods, goalsHistory, entries] = await Promise.all([
-    fetchCustomFoods(),
-    fetchAllGoals(),
-    fetchEntries(today),
-  ]);
+  let customFoods, goalsHistory, entries;
+  try {
+    [customFoods, goalsHistory, entries] = await Promise.all([
+      fetchCustomFoods(),
+      fetchAllGoals(),
+      fetchEntries(today),
+    ]);
+  } catch (err) {
+    console.error("שגיאה בטעינת נתונים:", err);
+    $("#app").innerHTML = `<p class="text-center text-red py-10">שגיאה בטעינת הנתונים: ${escapeHtml(
+      err && err.message ? err.message : "שגיאה לא ידועה"
+    )}</p>`;
+    return;
+  }
   state.customFoods = customFoods;
   state.goalsHistory = goalsHistory;
   state.goal = effectiveGoalFor(goalsHistory, today);
@@ -546,9 +555,14 @@ function updateGoal() {
       const v = parseFloat(input.value);
       if (v && v > 0) {
         const today = todayISO();
-        await setGoalDoc(today, v);
-        state.goalsHistory[today] = v;
-        state.goal = v;
+        try {
+          await setGoalDoc(today, v);
+          state.goalsHistory[today] = v;
+          state.goal = v;
+        } catch (err) {
+          console.error("שגיאה בשמירת היעד:", err);
+          alert("שמירת היעד נכשלה: " + (err && err.message ? err.message : "שגיאה לא ידועה"));
+        }
       }
       updateGoal();
       updateSummary();
