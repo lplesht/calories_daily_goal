@@ -101,6 +101,21 @@ const FOOD_DB = {
 };
 
 // ---------------------------------------------------------- data layer --
+// Food database (foods) stays shared across profiles on purpose — nutrition
+// facts aren't personal data, and sharing avoids re-adding the same product
+// twice. Entries and goals are the personal data and are scoped by profile.
+async function fetchProfiles() {
+  const snap = await getDocs(collection(db, "profiles"));
+  const list = [];
+  snap.forEach((d) => list.push({ id: d.id, ...d.data() }));
+  list.sort((a, b) => (a.createdAt?.seconds || 0) - (b.createdAt?.seconds || 0));
+  return list;
+}
+async function createProfile(name) {
+  const ref = await addDoc(collection(db, "profiles"), { name, createdAt: serverTimestamp() });
+  return ref.id;
+}
+
 async function fetchCustomFoods() {
   const snap = await getDocs(collection(db, "foods"));
   const out = {};
@@ -113,8 +128,10 @@ async function saveFood(name, per100) {
 async function deleteFoodDoc(name) {
   await deleteDoc(doc(db, "foods", name));
 }
-async function fetchEntries(dateStr) {
-  const q = query(collection(db, "entries"), where("date", "==", dateStr));
+async function fetchEntries(dateStr, profileId) {
+  // Two equality (==) filters on different fields — Firestore auto-merges
+  // its single-field indexes for this, no manual composite index needed.
+  const q = query(collection(db, "entries"), where("date", "==", dateStr), where("profileId", "==", profileId));
   const snap = await getDocs(q);
   const list = [];
   snap.forEach((d) => list.push({ id: d.id, ...d.data() }));
@@ -122,33 +139,39 @@ async function fetchEntries(dateStr) {
   return list;
 }
 async function addEntryDoc(entry) {
-  await addDoc(collection(db, "entries"), { ...entry, _order: Date.now(), createdAt: serverTimestamp() });
+  await addDoc(collection(db, "entries"), {
+    ...entry,
+    profileId: state.profileId,
+    _order: Date.now(),
+    createdAt: serverTimestamp(),
+  });
 }
 async function deleteEntryDoc(id) {
   await deleteDoc(doc(db, "entries", id));
 }
-async function fetchAllGoals() {
-  const snap = await getDocs(query(collection(db, "goals"), orderBy("date")));
+async function fetchAllGoals(profileId) {
+  // Equality-only filter, no orderBy — sorting happens client-side in
+  // effectiveGoalFor(), which avoids needing a composite index for
+  // "where(profileId) + orderBy(date)" (a different-field combo that would).
+  const snap = await getDocs(query(collection(db, "goals"), where("profileId", "==", profileId)));
   const history = {};
   snap.forEach((d) => (history[d.data().date] = d.data().goal));
   return history;
 }
 async function setGoalDoc(dateStr, value) {
-  // One document per date, overwritten on every edit — avoids duplicate
-  // same-day docs whose read-back order Firestore doesn't guarantee.
-  await setDoc(doc(db, "goals", dateStr), { date: dateStr, goal: value });
+  // One document per profile+date, overwritten on every edit — avoids
+  // duplicate same-day docs whose read-back order Firestore doesn't guarantee.
+  const id = `${state.profileId}_${dateStr}`;
+  await setDoc(doc(db, "goals", id), { date: dateStr, goal: value, profileId: state.profileId });
 }
-async function fetchEntriesForDates(dates) {
-  // Firestore 'in' supports up to 30 values — 7 is plenty.
-  const q = query(collection(db, "entries"), where("date", "in", dates));
+async function fetchAllEntriesForProfile(profileId) {
+  // Single equality filter — always safe, no composite index risk. Used for
+  // the history view; grouping by date happens client-side.
+  const q = query(collection(db, "entries"), where("profileId", "==", profileId));
   const snap = await getDocs(q);
-  const byDate = {};
-  dates.forEach((d) => (byDate[d] = []));
-  snap.forEach((d) => {
-    const data = d.data();
-    (byDate[data.date] || (byDate[data.date] = [])).push(data);
-  });
-  return byDate;
+  const list = [];
+  snap.forEach((d) => list.push({ id: d.id, ...d.data() }));
+  return list;
 }
 
 // Looks up average nutrition per 100g for a food name via Open Food Facts —
@@ -184,6 +207,8 @@ async function searchNutrition(name) {
 
 // ------------------------------------------------------------------ state --
 const state = {
+  profileId: null,
+  profileName: "",
   goal: 2000,
   goalsHistory: {},
   customFoods: {},
@@ -200,6 +225,9 @@ const state = {
   expandedHistoryDays: new Set(),
 };
 
+const PROFILE_ID_KEY = "calorieAppProfileId";
+const PROFILE_NAME_KEY = "calorieAppProfileName";
+
 // ------------------------------------------------------------------- init --
 async function init() {
   try {
@@ -208,13 +236,86 @@ async function init() {
     $("#app").innerHTML = `<p class="text-center text-red py-10">שגיאת התחברות. יש לבדוק חיבור לאינטרנט ולרענן.</p>`;
     return;
   }
+  const savedId = localStorage.getItem(PROFILE_ID_KEY);
+  if (savedId) {
+    state.profileId = savedId;
+    state.profileName = localStorage.getItem(PROFILE_NAME_KEY) || "";
+    await initApp();
+  } else {
+    await showProfilePicker();
+  }
+}
+
+async function showProfilePicker() {
+  let profiles = [];
+  try {
+    profiles = await fetchProfiles();
+  } catch (err) {
+    console.error("שגיאה בטעינת פרופילים:", err);
+  }
+  $("#app").innerHTML = `
+    <div class="flex flex-col items-center justify-center py-16 px-2">
+      <h1 class="font-display font-black text-2xl text-center mb-1 text-ink">חישוב קלוריות יומי</h1>
+      <p class="text-sm text-muted mb-6">מי משתמש/ת עכשיו?</p>
+      <div id="profile-list" class="w-full space-y-2 mb-4"></div>
+      <div class="w-full flex gap-2">
+        <input id="new-profile-name" type="text" placeholder="שם חדש..." class="flex-1 rounded-xl px-3 py-2.5 text-sm border border-border" />
+        <button id="add-profile-btn" class="px-4 rounded-xl text-sm font-display font-bold bg-ink text-white">הוספה</button>
+      </div>
+    </div>
+  `;
+  renderProfileList(profiles);
+  $("#add-profile-btn").addEventListener("click", async () => {
+    const name = $("#new-profile-name").value.trim();
+    if (!name) return;
+    const id = await createProfile(name);
+    selectProfile(id, name);
+  });
+}
+
+function renderProfileList(profiles) {
+  const container = $("#profile-list");
+  if (profiles.length === 0) {
+    container.innerHTML = `<p class="text-xs text-mutedLight text-center">אין עדיין פרופילים — צרי אחד למטה</p>`;
+    return;
+  }
+  container.innerHTML = profiles
+    .map(
+      (p) => `<button data-profile-id="${p.id}" data-profile-name="${escapeHtml(p.name)}" class="profile-option w-full flex items-center gap-3 bg-card rounded-xl px-4 py-3 shadow-sm text-right">
+        <span class="w-9 h-9 rounded-full bg-green flex items-center justify-center text-white font-display font-bold flex-shrink-0">${escapeHtml(
+          p.name.charAt(0)
+        )}</span>
+        <span class="text-sm font-medium text-ink">${escapeHtml(p.name)}</span>
+      </button>`
+    )
+    .join("");
+  $all(".profile-option", container).forEach((btn) =>
+    btn.addEventListener("click", () => selectProfile(btn.dataset.profileId, btn.dataset.profileName))
+  );
+}
+
+function selectProfile(id, name) {
+  localStorage.setItem(PROFILE_ID_KEY, id);
+  localStorage.setItem(PROFILE_NAME_KEY, name);
+  state.profileId = id;
+  state.profileName = name;
+  initApp();
+}
+
+function switchProfile() {
+  localStorage.removeItem(PROFILE_ID_KEY);
+  localStorage.removeItem(PROFILE_NAME_KEY);
+  location.reload();
+}
+
+async function initApp() {
   const today = todayISO();
   let customFoods, goalsHistory, entries;
   try {
     [customFoods, goalsHistory, entries] = await Promise.all([
       fetchCustomFoods(),
-      fetchAllGoals(),
-      fetchEntries(today),
+      fetchAllGoals(state.profileId),
+      fetchEntries(today, state.profileId),
     ]);
   } catch (err) {
     console.error("שגיאה בטעינת נתונים:", err);
@@ -284,7 +385,7 @@ function renderShell() {
       <div class="flex items-center gap-2">
         <div class="w-9 h-9 rounded-full bg-red flex items-center justify-center flex-shrink-0">🍽️</div>
         <div>
-          <h2 class="font-display font-bold text-base leading-tight text-ink">היומן שלי</h2>
+          <h2 class="font-display font-bold text-base leading-tight text-ink">היומן של ${escapeHtml(state.profileName)}</h2>
           <p class="text-xs leading-tight text-muted">${new Date().toLocaleDateString("he-IL", { weekday: "long", day: "numeric", month: "long" })}</p>
         </div>
       </div>
@@ -293,6 +394,9 @@ function renderShell() {
         <div id="menu-dropdown" class="hidden absolute left-0 mt-2 w-56 bg-card rounded-xl shadow-lg border border-border z-30 overflow-hidden">
           <button id="menu-history-btn" class="w-full text-right px-4 py-3 text-sm text-ink flex items-center gap-2">
             <span class="text-green">📅</span> היסטוריית אירועים
+          </button>
+          <button id="menu-switch-profile-btn" class="w-full text-right px-4 py-3 text-sm text-ink flex items-center gap-2" style="border-top:1px solid #E4DFCF">
+            <span class="text-green">👤</span> החלפת פרופיל
           </button>
         </div>
       </div>
@@ -748,7 +852,7 @@ function renderEntries() {
       ev.stopPropagation();
       if (!window.confirm("האם את בטוחה שברצונך למחוק את הפריט?")) return;
       await deleteEntryDoc(btn.dataset.delete);
-      state.entries = await fetchEntries(todayISO());
+      state.entries = await fetchEntries(todayISO(), state.profileId);
       updateSummary();
       renderEntries();
     })
@@ -955,7 +1059,7 @@ async function handleSaveMeal() {
   state.mealItems = [];
   $("#meal-name").value = "";
   renderMealItemsBox();
-  state.entries = await fetchEntries(todayISO());
+  state.entries = await fetchEntries(todayISO(), state.profileId);
   updateSummary();
   renderEntries();
 }
@@ -1065,7 +1169,7 @@ async function handleAddSingle() {
   $("#single-food-name").value = "";
   singleFoodPicker.reset();
   ["single-cal", "single-protein", "single-carbs", "single-fat"].forEach((id) => ($(`#${id}`).value = ""));
-  state.entries = await fetchEntries(todayISO());
+  state.entries = await fetchEntries(todayISO(), state.profileId);
   updateSummary();
   renderEntries();
 }
@@ -1150,7 +1254,12 @@ async function openDrawer() {
     d.setDate(d.getDate() - i);
     dateList.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`);
   }
-  const byDate = await fetchEntriesForDates(dateList);
+  const byDate = {};
+  dateList.forEach((d) => (byDate[d] = []));
+  const allEntries = await fetchAllEntriesForProfile(state.profileId);
+  allEntries.forEach((e) => {
+    if (byDate[e.date]) byDate[e.date].push(e);
+  });
   const days = dateList
     .map((dateStr) => {
       const dayEntries = byDate[dateStr] || [];
@@ -1298,6 +1407,10 @@ function bindStaticEvents() {
     ev.stopPropagation();
     $("#menu-dropdown").classList.add("hidden");
     openDrawer();
+  });
+  $("#menu-switch-profile-btn").addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    switchProfile();
   });
   $("#drawer-backdrop").addEventListener("click", closeDrawer);
 
